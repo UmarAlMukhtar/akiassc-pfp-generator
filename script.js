@@ -31,12 +31,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let photoOffsetX = 0;
     let photoOffsetY = 0;
     let isDragging = false;
-    let startDragX = 0;
-    let startDragY = 0;
-    
-    // Virtual resolution (we edit at the frame's native resolution for quality)
-    let virtualWidth = 0;
-    let virtualHeight = 0;
+    // Render Optimization State
+    let isRendering = false;
+    let renderRequested = false;
 
     // --- 1. Load Frame Automatically ---
     function loadFrame() {
@@ -133,6 +130,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function render() {
         if (!frameImage) return;
 
+        // Set rendering flag
+        isRendering = true;
+
         // Clear canvas
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         
@@ -152,6 +152,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // 3b. Draw Frame (On top)
         ctx.drawImage(frameImage, 0, 0, virtualWidth, virtualHeight);
+        
+        isRendering = false;
+        if (renderRequested) {
+            renderRequested = false;
+            requestAnimationFrame(render);
+        }
+    }
+    
+    function queueRender() {
+        if (!isRendering) {
+            renderRequested = false;
+            requestAnimationFrame(render);
+        } else {
+            renderRequested = true;
+        }
     }
 
     // --- 4. Controls & Interactions ---
@@ -181,36 +196,44 @@ document.addEventListener('DOMContentLoaded', () => {
             photoOffsetY -= (newHeight - oldHeight) / 2;
             
             scaleValue.innerText = `${e.target.value}%`;
-            render();
+            queueRender();
         }
     });
 
     // Mouse/Touch Dragging
-    function getEventPos(e, canvasElem) {
-        const rect = canvasElem.getBoundingClientRect();
-        
-        // Handle touch and mouse events uniformly
-        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    function getEventPos(e) {
+        // Find canvas bounds
+        const rect = canvas.getBoundingClientRect();
+        let clientX, clientY;
 
-        // Calculate position relative to the ACTUAL canvas DOM element bounds
-        const x = clientX - rect.left;
-        const y = clientY - rect.top;
-        
-        // Map to internal virtual resolution
-        const scaleX = virtualWidth / rect.width;
-        const scaleY = virtualHeight / rect.height;
-        
+        // Handle touch events vs mouse events
+        if (e.touches && e.touches.length > 0) {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+        } else if (e.changedTouches && e.changedTouches.length > 0) {
+            clientX = e.changedTouches[0].clientX;
+            clientY = e.changedTouches[0].clientY;
+        } else {
+            clientX = e.clientX;
+            clientY = e.clientY;
+        }
+
         return {
-            x: x * scaleX,
-            y: y * scaleY
+            x: clientX - rect.left,
+            y: clientY - rect.top
         };
     }
 
     const startDrag = (e) => {
         if (!userPhoto) return;
         isDragging = true;
-        const pos = getEventPos(e, canvas);
+        
+        // For touch devices, prevent default scrolling behavior when grabbing canvas
+        if (e.type === 'touchstart') {
+            e.preventDefault();
+        }
+        
+        const pos = getEventPos(e);
         startDragX = pos.x;
         startDragY = pos.y;
         canvas.style.cursor = 'grabbing';
@@ -218,35 +241,51 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const doDrag = (e) => {
         if (!isDragging || !userPhoto) return;
-        e.preventDefault(); // Prevent scrolling on touch devices
         
-        const pos = getEventPos(e, canvas);
-        const dx = pos.x - startDragX;
-        const dy = pos.y - startDragY;
+        // Prevent generic scrolling during drag across all devices
+        e.preventDefault();
         
-        photoOffsetX += dx;
-        photoOffsetY += dy;
+        const pos = getEventPos(e);
         
+        // Calculate raw pixel difference on screen
+        const screenDx = pos.x - startDragX;
+        const screenDy = pos.y - startDragY;
+        
+        // The canvas is scaled via CSS. We need to translate those screen pixels 
+        // back to our high-res virtual canvas coordinates.
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = virtualWidth / rect.width;
+        const scaleY = virtualHeight / rect.height;
+        
+        const virtualDx = screenDx * scaleX;
+        const virtualDy = screenDy * scaleY;
+        
+        photoOffsetX += virtualDx;
+        photoOffsetY += virtualDy;
+        
+        // Update purely based on previous screen position
         startDragX = pos.x;
         startDragY = pos.y;
         
-        render(); // Immediately render
+        queueRender(); 
     };
 
-    const endDrag = () => {
+    const endDrag = (e) => {
+        if (!isDragging) return;
         isDragging = false;
-        if(userPhoto) canvas.style.cursor = 'grab';
+        if (userPhoto) canvas.style.cursor = 'grab';
     };
 
     // Mouse Events
     canvas.addEventListener('mousedown', startDrag);
-    window.addEventListener('mousemove', doDrag);
+    window.addEventListener('mousemove', doDrag, { passive: false });
     window.addEventListener('mouseup', endDrag);
 
     // Touch Events
     canvas.addEventListener('touchstart', startDrag, { passive: false });
     window.addEventListener('touchmove', doDrag, { passive: false });
     window.addEventListener('touchend', endDrag);
+    window.addEventListener('touchcancel', endDrag);
 
     // --- 5. Download & Reset ---
     downloadBtn.addEventListener('click', () => {
